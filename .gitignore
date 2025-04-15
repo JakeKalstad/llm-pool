@@ -29,3 +29,5 @@ Cargo.lock
 
 # Logs
 *.log
+
+opensearch-dashboards-2.19.1-linux-x64.deb
