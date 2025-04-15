@@ -1,0 +1,80 @@
+{% extends "layout.html" %}
+
+{% block title %}Docs{% endblock %}
+{% block description %}Learn LLM Pool, simple service to manage your LLM requests over API{% endblock %}
+
+{% block content %}
+<!-- Table for Possible Servers -->
+<h1>LLM Pool API Documentation</h1>
+<p>Welcome to the LLM Pool API documentation. This guide describes the available endpoints and their usage.</p>
+
+<div class="endpoint">
+  <h2>Generate Response</h2>
+  <p><strong>Endpoint:</strong> <code>POST /api/generate</code></p>
+  <p><strong>Description:</strong> Submits a prompt to the LLM server and receives either a cached response or a
+    response ID for later retrieval.</p>
+
+  <h3>Request Example</h3>
+  <pre>
+curl --request POST \  
+--url http://localhost:8080/api/generate \  
+--header 'Content-Type: application/json' \  
+--header 'User-Agent: insomnia/11.0.0' \  
+--data '{
+"model": "gemma:7b",
+"prompt": "Analyze my csv 1,3,1,5123,5"
+}'
+    </pre>
+
+  <h3>Successful Response Example (Cached Response)</h3>
+  <pre>{
+"created_at": "2025-03-25 16:11:48",
+"done": true,
+"key": "319f8bdd-1941-4c20-9471-9e1764c65df7",
+"model": "gemma:7b",
+"ms_taken": 104340,
+"original_api_request": {
+    "model": "gemma:7b",
+    "prompt": "Analyze my csv 1,3,1,5123,5",
+    "stream": null
+},
+"response": "## Analysis of CSV Data:\n...",
+"server_url": "https://barycenter.local:11435/api/generate"
+}
+    </pre>
+
+  <h3>New Prompt Example - Response ID Returned</h3>
+  <pre>{
+"response_id": "7bb26695-9a3e-43e8-8118-ab6dc4845d71"
+}
+    </pre>
+
+  <h3>Notes</h3>
+  <ul>
+    <li>If a cached response exists, it will be returned immediately.</li>
+    <li>If no cached response is available, a <code>response_id</code> is provided for later retrieval.</li>
+  </ul>
+
+  <h2>Retrieve Response by ID</h2>
+  <p>Use this endpoint to retrieve a previously requested response using its unique response ID.</p>
+  <h3>Request</h3>
+  <pre><code>curl --request GET \  
+  --url http://localhost:8080/7bb26695-9a3e-43e8-8118-ab6dc4845d71 \  
+  --header 'User-Agent: insomnia/11.0.0'</code></pre>
+  <h3>Response</h3>
+  <pre><code>{
+    "created_at": "2025-03-25 17:07:39",
+    "done": false,
+    "key": "7bb26695-9a3e-43e8-8118-ab6dc4845d71",
+    "model": "gemma:7b",
+    "ms_taken": null,
+    "original_api_request": {
+        "model": "gemma:7b",
+        "prompt": "Analyze abc",
+        "stream": null
+    },
+    "response": "",
+    "server_url": "https://barycenter.local:11435/api/generate"
+}</code></pre>
+</div>
+{% endblock %}

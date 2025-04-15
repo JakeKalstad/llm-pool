@@ -1,0 +1,25 @@
+{
+    "redis_url": "redis://127.0.0.1:6379",
+    "redis_expiration": 604800,
+    "s3_url": "localhost:9000",
+    "s3_user": "KRw17UUzrGEK8Ojzw8JE",
+    "s3_pass": "f3wwlFJeF8ILpuFK8BO7sptxBNXC9NwtNBkAAcGn",
+    "s3_prompt_bucket": "prompt",
+    "s3_expiration": 30,
+    "opensearch_user": "admin",
+    "opensearch_password": "123_init_ABC",
+    "opensearch_index": "acme-test-company",
+    "opensearch_servers": [
+        {
+            "url": "https://barycenter.local:9201"
+        }
+    ],
+    "servers": [
+        {
+            "url": "https://barycenter.local:11435/api/",
+            "weight": 1,
+            "max_concurrent": 1
+        }
+    ],
+    "embedding_model": "mxbai-embed-large"
+}

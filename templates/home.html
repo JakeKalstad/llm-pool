@@ -1,0 +1,96 @@
+{% extends "layout.html" %}
+
+{% block title %}Home{% endblock %}
+{% block description %}Welcome to LLM Pool, harness the power of LLM development{% endblock %}
+
+{% block head %} 
+{% endblock %}
+
+{% block content %}
+<!-- Table for Possible Servers -->
+<h2>Possible Servers</h2>
+<table>
+  <thead>
+    <tr>
+      <th>URL</th>
+      <th>Weight</th>
+      <th>Max Concurrent</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for server in possible_servers %}
+    <tr>
+      <td>{{ server.url }}</td>
+      <td>{{ server.weight }}</td>
+      <td>{{ server.max_concurrent }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<!-- Table for Queued Requests -->
+<h2>Queued Requests</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Key</th>
+      <th>Created At</th>
+      <th>Model</th>
+      <th>Prompt</th>
+      <th>Response</th>
+      <th>Done</th>
+      <th>Time Taken (ms)</th>
+      <th>Server URL</th>
+      <th>Request Contextualized</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for queued_prompt in queued %}
+    <tr>
+      <td>{{ queued_prompt.key.as_deref().unwrap_or("N/A") }}</td>
+      <td>{{ queued_prompt.created_at }}</td>
+      <td>{{ queued_prompt.model }}</td>
+      <td>{{ queued_prompt.original_api_request.as_ref().unwrap().prompt}}</td>
+      <td>{{ queued_prompt.response }}</td>
+      <td>{{ queued_prompt.done }}</td>
+      <td>{{ queued_prompt.ms_taken.unwrap_or(0) }}</td>
+      <td>{{ queued_prompt.server_url.as_deref().unwrap_or("N/A") }}</td>
+      <td>{{ queued_prompt.original_api_request.as_ref().unwrap().contextualize.unwrap_or(false)}}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<!-- Table for Prompts -->
+<h2>Prompts</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Key</th>
+      <th>Created At</th>
+      <th>Model</th>
+      <th>Prompt</th>
+      <th>Response</th>
+      <th>Done</th>
+      <th>Time Taken (ms)</th>
+      <th>Server URL</th>
+      <th>Request Contextualized</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for prompt in prompts %}
+    <tr>
+      <td>{{ prompt.key.as_deref().unwrap_or("N/A") }}</td>
+      <td>{{ prompt.created_at }}</td>
+      <td>{{ prompt.model }}</td>
+      <td>{{ prompt.original_api_request.as_ref().unwrap().prompt}}</td>
+      <td>{{ prompt.response }}</td>
+      <td>{{ prompt.done }}</td>
+      <td>{{ prompt.ms_taken.unwrap_or(0) }}</td>
+      <td>{{ prompt.server_url.as_deref().unwrap_or("N/A") }}</td>
+      <td>{{ prompt.original_api_request.as_ref().unwrap().contextualize.unwrap_or(false)}}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

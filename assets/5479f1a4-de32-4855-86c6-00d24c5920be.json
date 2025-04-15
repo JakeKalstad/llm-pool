@@ -1,0 +1,1 @@
+{"created_at":"2025-03-25 21:33:54","done":true,"key":"5479f1a4-de32-4855-86c6-00d24c5920be","model":"gemma:7b","ms_taken":13146,"original_api_request":{"model":"gemma:7b","prompt":"Greetings!","stream":null},"response":"Greetings to you as well! 👋 It's a pleasure to be of service. How can I assist you today?","server_url":"https://barycenter.local:11435/api/generate"}

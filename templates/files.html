@@ -1,0 +1,27 @@
+{% extends "layout.html" %}
+
+{% block title %}File History{% endblock %}
+{% block description %}prompts/responses on disk{% endblock %}
+
+{% block head %} 
+{% endblock %}
+
+{% block content %}
+<h2>On File History</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Model</th>
+      <th>Created At</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for file in files %}
+    <tr>
+      <td><a href="/file/{{ file.key }}">{{ file.key }}</a></td>
+      <td>{{ file.last_modified }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

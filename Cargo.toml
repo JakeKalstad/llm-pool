@@ -1,0 +1,32 @@
+[package]
+name = "llm-pool"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tide = {version="*", features=["cookies"]}
+askama = "*"
+tokio = { version = "*", features = ["full"] }
+async-std = { version = "*", features = ["tokio1"] }
+async-trait = "*"
+serde = {version= "*"}
+serde_derive = "*"
+serde_json = {version= "*"}
+serde-this-or-that = "*"
+uuid = {version="*", features = [
+    "v4",                # Lets you generate random UUIDs
+    "fast-rng",          # Use a faster (but still sufficiently random) RNG
+    "serde",
+]}
+dotenv="*"
+redis="*"
+redis_pool="*"
+reqwest = { version = "*", features = ["json", "stream"] }
+twox-hash = "*"
+rand="*"
+chrono="*"
+minio-rsc="*"
+anyhow="*"
+bytes="*"
+opensearch="*"
+base64="*"
