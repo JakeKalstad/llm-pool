@@ -19,8 +19,8 @@ uuid = {version="*", features = [
     "serde",
 ]}
 dotenv="*"
-redis="*"
-redis_pool="*"
+redis = { version = "*", features = ["tokio-comp"] }
+redis_pool= { version = "*", features = ["cluster"] }
 reqwest = { version = "*", features = ["json", "stream"] }
 twox-hash = "*"
 rand="*"

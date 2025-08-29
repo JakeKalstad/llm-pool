@@ -16,7 +16,7 @@ use tide::{http::mime, Request};
 use tokio::task;
 
 use rand::rng;
-use rand::seq::IndexedRandom; 
+use rand::seq::IndexedRandom;
 use uuid::Uuid;
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -184,6 +184,11 @@ pub async fn find_available_server(
     None
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+pub struct GenerateResponse {
+    pub response_id: String,
+    pub queued: bool,
+}
 pub async fn request(mut req: Request<State>) -> tide::Result {
     let api_request: RequestBody = req.body_json().await.expect("unmarshal json");
 
@@ -199,7 +204,13 @@ pub async fn request(mut req: Request<State>) -> tide::Result {
             .get(&request_prompt_key)
             .await
             .expect("get response cache key");
-        let response: String = redis.get(&response_id).await.expect("get cached response");
+
+        let response = serde_json::to_string(&GenerateResponse {
+            response_id: response_id.to_string(),
+            queued: false,
+        })
+        .expect("get response");
+        // let response: String = redis.get(&response_id).await.expect("get cached response");
         return Ok(tide::Response::builder(tide::StatusCode::Ok)
             .content_type(mime::JSON)
             .body(response)
@@ -260,9 +271,14 @@ pub async fn request(mut req: Request<State>) -> tide::Result {
                 )
                 .await
                 .unwrap();
+            let response = serde_json::to_string(&GenerateResponse {
+                response_id: response_id.to_string(),
+                queued: true,
+            })
+            .expect("get response");
             Ok(tide::Response::builder(tide::StatusCode::Ok)
                 .content_type(mime::JSON)
-                .body(format!("{{ 'response_id': '{response_id}' }}"))
+                .body(response)
                 .build())
         }
         None => {
@@ -279,6 +295,7 @@ pub async fn request(mut req: Request<State>) -> tide::Result {
 
             let request_prompt_queue_key =
                 queue_cache_string(&prompt_hash, &api_request.clone().model.clone());
+
             let mut queued_response_id: String = redis
                 .get(&request_prompt_queue_key)
                 .await
@@ -302,11 +319,14 @@ pub async fn request(mut req: Request<State>) -> tide::Result {
                 queued_response_id = response_id.to_string();
             };
 
+            let response = serde_json::to_string(&GenerateResponse{
+                response_id: queued_response_id.to_string(),
+                queued:  true,
+             }).expect("get response");
+
             return Ok(tide::Response::builder(tide::StatusCode::TooManyRequests)
                 .content_type(mime::JSON)
-                .body(format!(
-                    "{{'response_id': '{queued_response_id}', 'queued': true}}"
-                ))
+                .body(response)
                 .build());
         }
     }
@@ -348,9 +368,11 @@ async fn llm_request(
     let _reset_res: String = conn.incr(&server.url, 1).await.unwrap();
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
+        .timeout(std::time::Duration::from_secs(120))
         .build()
         .unwrap();
     let now: SystemTime = SystemTime::now();
+    let mut res = ApiResponse{created_at:String::new(), done: false, key: None, model:String::new(),response: String::new(), ms_taken: None, original_api_request: None, server_url: None};
     let mut final_prompt = String::default();
     if request_body.contextualize.unwrap_or_default() {
         let prompt_embedding = embedding_request(
@@ -376,9 +398,8 @@ async fn llm_request(
             .await
             .expect("search");
             for hit in search_results.hits.hits.iter().clone() {
-                let res: ApiResponse =
-                    serde_json::from_str(&hit._source.text.clone()).expect("json valid");
-
+                res = serde_json::from_str(&hit._source.text.clone()).expect("json valid");
+                
                 context = format!(
                     "{} \n\n {} \n {}",
                     context,
@@ -389,12 +410,13 @@ async fn llm_request(
         }
         final_prompt = format!(
             "For additional context use our previous conversation: {} \n::: prompt :::\n {}\n",
-            context, request_body.prompt.clone()
+            context,
+            request_body.prompt.clone()
         )
     } else {
         final_prompt = request_body.prompt.clone()
     };
-    println!("{final_prompt}");
+    
     let res = client
         .post(url)
         .header(header::CONTENT_TYPE, "application/json")
@@ -412,7 +434,7 @@ async fn llm_request(
     match now.elapsed() {
         Ok(elapsed) => ms_taken = Some(elapsed.as_millis()),
         Err(e) => {
-            println!("Error: {e:?}");
+            println!("Error: {:?}", e);
         }
     };
 
@@ -422,20 +444,21 @@ async fn llm_request(
         created_at: timestamp_str.clone(),
         done: true,
         model: request_body.model.clone(),
-        ms_taken: ms_taken,
+        ms_taken,
         server_url: Some(server.url.clone()),
-        original_api_request: Some(request_body),
+        original_api_request: Some(request_body.clone()),
     };
     let data = json!(res_obj).to_string();
     println!("result {data}\n");
     let file_data = data.as_bytes().to_vec();
+    let file_name = format!("{response_id}.json").clone();
     let _ = s3::write_file_fs(
         s3_url.clone(),
         s3_user.clone(),
         s3_pass.clone(),
         expiration_days,
         s3_bucket.clone(),
-        format!("{response_id}.json").clone(),
+        file_name.clone(),
         file_data.clone(),
     )
     .await;
@@ -460,12 +483,20 @@ async fn llm_request(
             response_id.to_string(),
             data.clone(),
             embedding.embeddings.clone(),
+
+
+            Some(file_name.clone()),
+            Some("test".to_string()),
+            Some("api".to_string()),
+            Some(request_body.model.clone()),
+            Some(timestamp_str.clone()),
+
         )
         .await
         .expect("Inserted into opensearch");
     }
     let embedding_data = json!(embedding);
-    let embedding_data = base64::encode(embedding_data.to_string());
+    let embedding_data = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, embedding_data.to_string());
 
     let embed_hash = hash_string(&embed_request.input);
     let request_embed_key = embed_cache_string(&embed_hash, &embed_request.model);
@@ -484,8 +515,8 @@ async fn llm_request(
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct EmbeddingResponse {
-    model: String,
-    embeddings: Vec<Vec<f64>>,
+    pub model: String,
+    pub embeddings: Vec<Vec<f64>>,
 }
 
 pub async fn embedding_request(
@@ -508,15 +539,16 @@ pub async fn embedding_request(
             .get(&request_embed_key)
             .await
             .expect("get response cache key");
-        let embed_response_json = base64::decode(embed_response_json).expect("decode proper");
+        let embed_response_json = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, embed_response_json);
         let response: EmbeddingResponse =
-            serde_json::from_slice(embed_response_json.as_slice()).expect("valid json");
-
+            serde_json::from_str(&embed_response_json).expect("valid json");
+        
         return response;
     };
 
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
+        .timeout(std::time::Duration::from_secs(120))
         .build()
         .unwrap();
 
@@ -529,7 +561,7 @@ pub async fn embedding_request(
         .expect("Failed to send request");
     let response: EmbeddingResponse = res.json().await.expect("works");
     let data = json!(response);
-    let data = base64::encode(data.to_string());
+    let data = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data.to_string());
     let _data_cache_res: String = conn
         .set_ex(response_id.to_string(), data.as_str(), redis_expiration)
         .await
@@ -552,16 +584,19 @@ pub fn select_best_server(servers: &Vec<LLMServer>) -> Option<LLMServer> {
 
 async fn process_stream(res: reqwest::Response) -> Result<String, String> {
     let mut total_response = "".to_string();
+    print!("{}", res.status());
     if res.status().is_success() {
+        let full_response = res.text().await.expect("got full response");
+        return Ok(full_response);
         let mut buffer = String::new(); // Buffer for partial JSON
         let mut stream = res.bytes_stream();
-
         while let Some(item) = stream.next().await {
             match item {
                 Ok(chunk) => {
                     // Convert bytes to string
-                    let chunk_str = str::from_utf8(&chunk).unwrap_or("");
+                    let chunk_str: &str = str::from_utf8(&chunk).unwrap_or("");
                     buffer.push_str(chunk_str); // Collect chunks into the buffer
+                    println!("{chunk_str}");
 
                     // Attempt to deserialize the buffer as JSON objects
                     while let Some(end) = buffer.find("}") {

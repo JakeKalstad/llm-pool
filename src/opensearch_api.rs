@@ -10,7 +10,7 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use tide::{http::mime, Body, Request};
+use tide::{http::mime, Request};
 use uuid::Uuid;
 
 use crate::api::{embedding_request, find_available_server, EmbedRequestBody};
@@ -33,6 +33,10 @@ pub(crate) fn new(
 #[derive(Clone, Deserialize, Serialize)]
 pub struct IndexRequestBody {
     pub content: String,
+    pub filename: Option<String>,
+    pub url: Option<String>,
+    pub source: Option<String>,
+    pub index_name: Option<String>,
 }
 
 pub async fn index(mut req: Request<crate::State>) -> tide::Result {
@@ -43,36 +47,51 @@ pub async fn index(mut req: Request<crate::State>) -> tide::Result {
     let datetime: DateTime<Utc> = now.into();
     let timestamp_str = datetime.format("%Y-%m-%d %H:%M:%S").to_string();
     let mut redis = state.pool.acquire().await?;
+
     let next_available = find_available_server(&mut state.possible_servers.clone(), &mut redis).await;
+    let opensearch = state.opensearch_clients.first().expect("no open search cluster is available for use");
     match next_available {
         Some(server) => {
-            embedding_request(
+            let doc_id = Uuid::new_v4();
+            let embed_response = embedding_request(
                 state.pool.clone(),
                 state.redis_expiration,
-                timestamp_str,
+                timestamp_str.clone(),
                 server,
                 EmbedRequestBody {
                     model: state.embedding_model.clone(),
                     input: api_request.content.clone(),
                     stream: Some(false),
                 },
-                Uuid::nil(),
-            )
-            .await;
+                doc_id,
+            ).await;
 
-            return Ok(tide::Response::builder(tide::StatusCode::Ok)
+            insert_document(
+                opensearch,
+                api_request.index_name.unwrap_or("default_index".to_string()).clone(),
+                doc_id.to_string(),
+                api_request.content.clone(),
+                embed_response.embeddings.clone(),
+                api_request.filename.clone(),
+                api_request.url.clone(),
+                api_request.source.clone(),
+                Some(state.embedding_model.clone()),
+                Some(timestamp_str.clone()),
+            ).await?;
+
+            Ok(tide::Response::builder(tide::StatusCode::Ok)
                 .content_type(mime::JSON)
                 .body("{}")
-                .build());
+                .build())
         }
-        None => {
-            return Ok(tide::Response::builder(tide::StatusCode::TooManyRequests)
-                .content_type(mime::JSON)
-                .body("{}")
-                .build());
-        }
+
+        None => Ok(tide::Response::builder(tide::StatusCode::TooManyRequests)
+            .content_type(mime::JSON)
+            .body("{}")
+            .build()),
     }
 }
+
 
 pub(crate) async fn ping(
     url: Url,
@@ -117,11 +136,13 @@ pub(crate) async fn create_index(
         },
         "mappings": {
             "properties": {
-                "text": { "type": "text" },
-                "embedding": {
-                    "type": "knn_vector",
-                    "dimension": 1024
-                }
+                "vector": {"type": "knn_vector", "dimension": 384},
+                "filename": {"type": "keyword"},
+                "text": {"type": "text"},
+                "url": {"type": "keyword"},
+                "source": {"type": "keyword"},
+                "model": { "type": "text" },
+                "timestamp": { "type": "text" },
             }
         }
     });
@@ -134,7 +155,19 @@ pub(crate) async fn create_index(
         .await?;
     let status = response.status_code();
     let text = response.text().await?;
+    println!("{status} {text}");
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+pub struct Document<'a> {
+    pub text: &'a str,
+    pub vector: Vec<f64>,
+    pub filename: Option<&'a str>,
+    pub url: Option<&'a str>,
+    pub source: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub timestamp: Option<&'a str>,
 }
 
 pub(crate) async fn insert_document(
@@ -143,23 +176,33 @@ pub(crate) async fn insert_document(
     id: String,
     text: String,
     embedding: Vec<Vec<f64>>,
+    filename: Option<String>,
+    url: Option<String>,
+    source: Option<String>,
+    model: Option<String>,
+    timestamp: Option<String>,
 ) -> Result<(), anyhow::Error> {
-    let flattened_embedding: Vec<f64> = embedding.into_iter().flatten().collect();
+    let flattened_vector: Vec<f64> = embedding.into_iter().flatten().collect();
 
-    // Construct the document
-    let doc = json!({
-        "text": text,
-        "embedding": flattened_embedding
-    });
+    let doc = Document {
+        text: &text,
+        vector: flattened_vector,
+        filename: filename.as_deref(),
+        url: url.as_deref(),
+        source: source.as_deref(),
+        model: model.as_deref(),
+        timestamp: timestamp.as_deref(),
+    };
 
     let response = client
-        .index(opensearch::IndexParts::IndexId(&index_name, id.as_str()))
-        .body(doc)
+        .index(opensearch::IndexParts::IndexId(&index_name, &id))
+        .body(&doc)
         .send()
         .await?;
-    println!("Insert Response: {:?}", &response.status_code());
-    let r = response.text().await.expect("response").clone();
-    println!("Insert Response {r}");
+
+    println!("Insert status: {:?}", response.status_code());
+    println!("Insert response: {}", response.text().await.unwrap_or_default());
+
     Ok(())
 }
 
@@ -168,13 +211,14 @@ pub(crate) async fn search_similar(
     index_name: String,
     query_vector: Vec<Vec<f64>>,
 ) -> Result<SearchResponse, anyhow::Error> {
-    let flattened_embedding: Vec<f64> = query_vector.into_iter().flatten().collect();
+    let flattened_vector: Vec<f64> = query_vector.into_iter().flatten().collect();
+
     let query = json!({
         "size": 3,
         "query": {
             "knn": {
-                "embedding": {
-                    "vector": flattened_embedding,
+                "vector": {
+                    "vector": flattened_vector,
                     "k": 25
                 }
             }

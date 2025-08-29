@@ -58,7 +58,7 @@ pub async fn list_files(
 ) -> Result<Vec<minio_rsc::datatype::Object>> {
     let client = create_minio_client(s3_url, s3_user, s3_pass).await?;
 
-    let mut stream = client.list_objects(bucket_name, <ListObjectsArgs as std::default::Default>::default());
+    let stream = client.list_objects(bucket_name, <ListObjectsArgs as std::default::Default>::default());
 
     let results = stream.await.expect("get files");
 
@@ -91,7 +91,7 @@ pub async fn set_lifecycle_policy(
         .put(&url)
         .basic_auth(s3_user, Some(s3_pass))
         .header("Content-Type", "application/xml")
-        .body(get_lifecycle_xml(5))
+        .body(get_lifecycle_xml(expiration_days.try_into().unwrap()))
         .send()
         .await?;
 
