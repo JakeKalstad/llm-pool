@@ -92,7 +92,7 @@ async fn main() -> tide::Result<()> {
     let config = read_config("config.json").await.unwrap();
     let redis_url = config.redis_url;
     let client = redis::Client::open(redis_url).expect("Error while testing the connection");
-    let pool = RedisPool::from(client);
+    let pool: RedisPool<redis::Client, redis::aio::MultiplexedConnection> = RedisPool::from(client);
     let p = pool.clone();
     let mut opensearch_clients = vec![];
     for os in config.opensearch_servers.clone() {
