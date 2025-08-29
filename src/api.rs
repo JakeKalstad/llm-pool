@@ -6,13 +6,14 @@ use std::{
 use crate::{opensearch_api, s3, LLMServer, State};
 use async_std::stream::StreamExt;
 use chrono::{DateTime, Utc};
+use minio_rsc::http::status;
 use opensearch::OpenSearch;
 use redis::{aio::MultiplexedConnection, AsyncCommands, Client};
 use redis_pool::{connection::RedisPoolConnection, RedisPool};
 use reqwest::{header, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tide::{http::mime, Request};
+use tide::{http::mime, Request, Status};
 use tokio::task;
 
 use rand::rng;
@@ -319,10 +320,11 @@ pub async fn request(mut req: Request<State>) -> tide::Result {
                 queued_response_id = response_id.to_string();
             };
 
-            let response = serde_json::to_string(&GenerateResponse{
+            let response = serde_json::to_string(&GenerateResponse {
                 response_id: queued_response_id.to_string(),
-                queued:  true,
-             }).expect("get response");
+                queued: true,
+            })
+            .expect("get response");
 
             return Ok(tide::Response::builder(tide::StatusCode::TooManyRequests)
                 .content_type(mime::JSON)
@@ -368,11 +370,20 @@ async fn llm_request(
     let _reset_res: String = conn.incr(&server.url, 1).await.unwrap();
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(300))
         .build()
         .unwrap();
     let now: SystemTime = SystemTime::now();
-    let mut res = ApiResponse{created_at:String::new(), done: false, key: None, model:String::new(),response: String::new(), ms_taken: None, original_api_request: None, server_url: None};
+    let mut res = ApiResponse {
+        created_at: String::new(),
+        done: false,
+        key: None,
+        model: String::new(),
+        response: String::new(),
+        ms_taken: None,
+        original_api_request: None,
+        server_url: None,
+    };
     let mut final_prompt = String::default();
     if request_body.contextualize.unwrap_or_default() {
         let prompt_embedding = embedding_request(
@@ -399,7 +410,7 @@ async fn llm_request(
             .expect("search");
             for hit in search_results.hits.hits.iter().clone() {
                 res = serde_json::from_str(&hit._source.text.clone()).expect("json valid");
-                
+
                 context = format!(
                     "{} \n\n {} \n {}",
                     context,
@@ -416,10 +427,11 @@ async fn llm_request(
     } else {
         final_prompt = request_body.prompt.clone()
     };
-    
-    let res = client
+
+    let res: Result<reqwest::Response, reqwest::Error> = client
         .post(url)
         .header(header::CONTENT_TYPE, "application/json")
+        .timeout(std::time::Duration::from_secs(300))
         .json(&RequestBody {
             contextualize: request_body.contextualize,
             model: request_body.model.clone(),
@@ -427,8 +439,24 @@ async fn llm_request(
             stream: request_body.stream,
         })
         .send()
-        .await
-        .expect("Failed to send request");
+        .await;
+    let res = match res {
+        Ok(r) => r,
+        Err(e) => {
+            println!("{e}");
+            return;
+        }
+    };
+    if !res.status().is_success() {
+        println!("{:?}", res);
+        let _data_cache_res: String = conn
+            .del(response_id.to_string())
+            .await
+            .expect("del val");
+        let _reset_res: String = conn.decr(&server.url, 1).await.unwrap();
+        return;
+    }
+
     let total_response: Result<String, String> = process_stream(res).await;
     let mut ms_taken: Option<u128> = None;
     match now.elapsed() {
@@ -437,10 +465,11 @@ async fn llm_request(
             println!("Error: {:?}", e);
         }
     };
+    let response: String = total_response.unwrap_or_default();
 
     let res_obj = ApiResponse {
         key: Some(response_id.to_string()),
-        response: total_response.unwrap_or_default(),
+        response: response.clone(),
         created_at: timestamp_str.clone(),
         done: true,
         model: request_body.model.clone(),
@@ -449,7 +478,6 @@ async fn llm_request(
         original_api_request: Some(request_body.clone()),
     };
     let data = json!(res_obj).to_string();
-    println!("result {data}\n");
     let file_data = data.as_bytes().to_vec();
     let file_name = format!("{response_id}.json").clone();
     let _ = s3::write_file_fs(
@@ -462,6 +490,14 @@ async fn llm_request(
         file_data.clone(),
     )
     .await;
+    if response.len() == 0 {
+        let _data_cache_res: String = conn
+            .del(response_id.to_string())
+            .await
+            .expect("del val");
+        let _reset_res: String = conn.decr(&server.url, 1).await.unwrap();
+        return;
+    }
     let embed_request = EmbedRequestBody {
         model: embedding_model.clone(),
         input: data.clone(),
@@ -483,20 +519,20 @@ async fn llm_request(
             response_id.to_string(),
             data.clone(),
             embedding.embeddings.clone(),
-
-
             Some(file_name.clone()),
             Some("test".to_string()),
             Some("api".to_string()),
             Some(request_body.model.clone()),
             Some(timestamp_str.clone()),
-
         )
         .await
         .expect("Inserted into opensearch");
     }
     let embedding_data = json!(embedding);
-    let embedding_data = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, embedding_data.to_string());
+    let embedding_data = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        embedding_data.to_string(),
+    );
 
     let embed_hash = hash_string(&embed_request.input);
     let request_embed_key = embed_cache_string(&embed_hash, &embed_request.model);
@@ -539,16 +575,19 @@ pub async fn embedding_request(
             .get(&request_embed_key)
             .await
             .expect("get response cache key");
-        let embed_response_json = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, embed_response_json);
+        let embed_response_json = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            embed_response_json,
+        );
         let response: EmbeddingResponse =
             serde_json::from_str(&embed_response_json).expect("valid json");
-        
+
         return response;
     };
 
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(300))
         .build()
         .unwrap();
 
@@ -556,6 +595,7 @@ pub async fn embedding_request(
         .post(url)
         .header(header::CONTENT_TYPE, "application/json")
         .json(&request_body)
+        .timeout(std::time::Duration::from_secs(300))
         .send()
         .await
         .expect("Failed to send request");
@@ -581,50 +621,47 @@ pub fn select_best_server(servers: &Vec<LLMServer>) -> Option<LLMServer> {
     let c = candidates.choose(&mut rng).copied();
     Some(c.unwrap().clone())
 }
-
 async fn process_stream(res: reqwest::Response) -> Result<String, String> {
-    let mut total_response = "".to_string();
-    print!("{}", res.status());
-    if res.status().is_success() {
-        let full_response = res.text().await.expect("got full response");
-        return Ok(full_response);
-        let mut buffer = String::new(); // Buffer for partial JSON
-        let mut stream = res.bytes_stream();
-        while let Some(item) = stream.next().await {
-            match item {
-                Ok(chunk) => {
-                    // Convert bytes to string
-                    let chunk_str: &str = str::from_utf8(&chunk).unwrap_or("");
-                    buffer.push_str(chunk_str); // Collect chunks into the buffer
-                    println!("{chunk_str}");
+    let mut buffer = String::new();
+    let mut total_response = String::new();
+    let mut stream = res.bytes_stream();
 
-                    // Attempt to deserialize the buffer as JSON objects
-                    while let Some(end) = buffer.find("}") {
-                        let json_chunk = &buffer[..=end];
-                        match serde_json::from_str::<ApiResponse>(json_chunk) {
-                            Ok(api_response) => {
-                                total_response += &api_response.response;
-                            }
-                            Err(e) => {
-                                return Err(format!("Failed to deserialize chunk: {:?}", e));
-                            }
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(chunk) => {
+                let chunk_str = std::str::from_utf8(&chunk).unwrap_or("");
+                buffer.push_str(chunk_str);
+
+                // Try to parse complete JSON objects
+                while let Some(end) = buffer.find("}") {
+                    let json_chunk = &buffer[..=end];
+                    match serde_json::from_str::<ApiResponse>(json_chunk) {
+                        Ok(api_response) => {
+                            total_response.push_str(&api_response.response);
                         }
-                        // Remove the processed chunk from the buffer
-                        buffer.drain(..=end);
+                        Err(_) => {
+                            // Not a complete JSON yet; break and wait for more
+                            break;
+                        }
                     }
-                }
-                Err(e) => {
-                    return Err(format!("Error while streaming: {:?}", e));
+                    buffer.drain(..=end);
                 }
             }
+            Err(e) => return Err(format!("Stream error: {:?}", e)),
         }
-    } else {
-        return Err(format!(
-            "Failed to get a valid response. Status: {}",
-            res.status()
-        ));
     }
-    return Ok(total_response);
+
+    // Return any leftover buffer if valid JSON
+    if !buffer.is_empty() {
+        if let Ok(api_response) = serde_json::from_str::<ApiResponse>(&buffer) {
+            total_response.push_str(&api_response.response);
+        } else {
+            // Fallback: include raw text
+            total_response.push_str(&buffer);
+        }
+    }
+
+    Ok(total_response)
 }
 
 fn hash_string(input: &str) -> String {
