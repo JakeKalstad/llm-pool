@@ -24,13 +24,13 @@ pub async fn files(req: Request<State>) -> tide::Result {
 }
 
 pub async fn home(req: Request<State>) -> tide::Result {
-    let mut redis = req.state().pool.acquire().await?;
+    let mut redis = req.state().pool.get().await?;
     let queue_pattern = "queue-*".to_string();
     let prompt_pattern = "prompt-*".to_string();
     let mut queued_records = vec![];
     let mut prompt_records = vec![];
 
-    let queued = api::scan_keys(&mut redis, queue_pattern)
+    let queued = api::scan_keys(&mut redis.clone(), queue_pattern)
         .await
         .unwrap_or_default();
     for q in queued {
@@ -40,7 +40,7 @@ pub async fn home(req: Request<State>) -> tide::Result {
             serde_json::from_str(&response_data_json).expect("response json is valid");
         queued_records.push(response);
     }
-    let prompts = api::scan_keys(&mut redis, prompt_pattern)
+    let prompts = api::scan_keys(&mut redis.clone(), prompt_pattern)
         .await
         .unwrap_or_default();
     for p in prompts {

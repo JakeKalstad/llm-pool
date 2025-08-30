@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use ::opensearch::OpenSearch;
+use bb8_redis::RedisConnectionManager;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use tide::{Body, Request, Response, StatusCode};
@@ -12,12 +13,10 @@ mod api;
 mod home;
 mod opensearch_api;
 mod s3;
-use redis;
-use redis_pool::RedisPool;
 
 #[derive(Clone)]
 pub struct State {
-    pool: RedisPool<redis::Client, redis::aio::MultiplexedConnection>,
+    pool: std::sync::Arc<bb8::Pool<RedisConnectionManager>>,
     possible_servers: Vec<LLMServer>,
     redis_expiration: u64,
     s3_url: String,
@@ -29,7 +28,7 @@ pub struct State {
     opensearch_password: String,
     opensearch_servers: Vec<OSServer>,
     opensearch_index: String,
-    opensearch_clients: Vec<OpenSearch>,
+    opensearch_clients: std::sync::Arc<Vec<OpenSearch>>,
     embedding_model: String,
 }
 
@@ -91,33 +90,42 @@ async fn read_config(path: &str) -> Result<AppConfig, Box<dyn std::error::Error>
 async fn main() -> tide::Result<()> {
     let config = read_config("config.json").await.unwrap();
     let redis_url = config.redis_url;
-    let client = redis::Client::open(redis_url).expect("Error while testing the connection");
-    let pool: RedisPool<redis::Client, redis::aio::MultiplexedConnection> = RedisPool::from(client);
-    let p = pool.clone();
-    let mut opensearch_clients = vec![];
-    for os in config.opensearch_servers.clone() {
-        let _x = opensearch_api::ping(
-            Url::from_str(&os.url).expect("Url works"),
-            config.opensearch_user.clone(),
-            config.opensearch_password.clone(),
-        )
-        .await
-        .unwrap();
-        let client = opensearch_api::new(
-            Url::from_str(&os.url).expect("Url works"),
-            config.opensearch_user.clone(),
-            config.opensearch_password.clone(),
-        )
-        .expect("client created");
-        opensearch_api::create_index(&client, config.opensearch_index.clone())
+
+    let opensearch_clients: Vec<OpenSearch> =
+        futures::future::join_all(config.opensearch_servers.iter().map(|os| async {
+            let _ = opensearch_api::ping(
+                Url::from_str(&os.url).unwrap(),
+                config.opensearch_user.clone(),
+                config.opensearch_password.clone(),
+            )
             .await
             .unwrap();
-        opensearch_clients.push(client);
-    }
+            let client = opensearch_api::new(
+                Url::from_str(&os.url).unwrap(),
+                config.opensearch_user.clone(),
+                config.opensearch_password.clone(),
+            )
+            .unwrap();
+            opensearch_api::create_index(&client, config.opensearch_index.clone())
+                .await
+                .unwrap();
+            client
+        }))
+        .await;
 
+    let manager = bb8_redis::RedisConnectionManager::new(redis_url).unwrap();
+    let pool = bb8::Pool::builder().build(manager).await.unwrap();
+
+        use std::sync::Arc;
+
+    let pool = Arc::new(pool);
+    let opensearch_clients = Arc::new(opensearch_clients);
+    let servers = Arc::new(config.servers.clone());
+    
+    let p = pool.clone();
     let state = State {
         pool: p,
-        possible_servers: config.servers,
+        possible_servers: config.servers.clone(),
         opensearch_clients: opensearch_clients.clone(),
         redis_expiration: config.redis_expiration,
         s3_url: config.s3_url.clone(),
@@ -142,27 +150,32 @@ async fn main() -> tide::Result<()> {
     let opensearch_index = config.opensearch_index.clone();
     let embedding_model = config.embedding_model.clone();
 
-    tokio::spawn(async move {
-        loop {
-            println!("Running periodic task...");
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            api::pop_queue(
-                pool.clone(),
-                &servers,
-                config.redis_expiration,
-                s3_url.to_string(),
-                s3_user.to_string(),
-                s3_pass.to_string(),
-                config.s3_expiration.clone(),
-                s3_prompt_bucket.to_string(),
-                &opensearch_servers,
-                opensearch_user.clone(),
-                opensearch_password.clone(),
-                opensearch_index.clone(),
-                opensearch_clients.clone(),
-                embedding_model.clone(),
-            )
-            .await;
+    tokio::spawn({
+        let pool = pool.clone();
+        let opensearch_clients = opensearch_clients.clone();
+        let servers = servers.clone();
+        async move {
+            loop {
+                println!("Running periodic task...");
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                api::pop_queue(
+                    pool.clone(),
+                    &servers,
+                    config.redis_expiration,
+                    s3_url.to_string(),
+                    s3_user.clone(),
+                    s3_pass.clone(),
+                    config.s3_expiration.clone(),
+                    s3_prompt_bucket.clone(),
+                    &opensearch_servers,
+                    opensearch_user.clone(),
+                    opensearch_password.clone(),
+                    opensearch_index.clone(),
+                    opensearch_clients.clone(),
+                    embedding_model.clone(),
+                )
+                .await;
+            }
         }
     });
 

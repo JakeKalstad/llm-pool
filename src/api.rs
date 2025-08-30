@@ -5,15 +5,15 @@ use std::{
 
 use crate::{opensearch_api, s3, LLMServer, State};
 use async_std::stream::StreamExt;
+use bb8::PooledConnection;
+use bb8_redis::RedisConnectionManager;
 use chrono::{DateTime, Utc};
-use minio_rsc::http::status;
 use opensearch::OpenSearch;
 use redis::{aio::MultiplexedConnection, AsyncCommands, Client};
-use redis_pool::{connection::RedisPoolConnection, RedisPool};
 use reqwest::{header, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tide::{http::mime, Request, Status};
+use tide::{http::mime, Request};
 use tokio::task;
 
 use rand::rng;
@@ -49,7 +49,7 @@ pub struct ApiResponse {
 }
 
 pub async fn pop_queue(
-    pool: RedisPool<Client, MultiplexedConnection>,
+    pool: std::sync::Arc<bb8::Pool<RedisConnectionManager>>,
     possible_servers: &Vec<LLMServer>,
     redis_expiration: u64,
     s3_url: String,
@@ -61,16 +61,16 @@ pub async fn pop_queue(
     opensearch_user: String,
     opensearch_password: String,
     opensearch_index: String,
-    opensearch_clients: Vec<OpenSearch>,
+    opensearch_clients: std::sync::Arc<Vec<OpenSearch>>,
     embedding_model: String,
 ) {
     let now = SystemTime::now();
     let datetime: DateTime<Utc> = now.into(); // Convert to UTC datetime
     let timestamp_str = datetime.format("%Y-%m-%d %H:%M:%S").to_string();
 
-    let mut redis = pool.acquire().await.expect("acquire redis conn");
+    let mut redis = pool.get().await.expect("get redis conn");
     let pattern = "queue-*".to_string();
-    let keys = scan_keys(&mut redis, pattern)
+    let keys = scan_keys(&mut redis.clone(), pattern)
         .await
         .expect("scan available queue keys");
 
@@ -141,7 +141,7 @@ pub async fn pop_queue(
 }
 
 pub(crate) async fn scan_keys(
-    con: &mut RedisPoolConnection<MultiplexedConnection>,
+    con: &mut impl redis::aio::ConnectionLike,
     pattern: String,
 ) -> redis::RedisResult<Vec<String>> {
     let mut cursor = 0;
@@ -170,7 +170,7 @@ pub(crate) async fn scan_keys(
 
 pub async fn find_available_server(
     possible_servers: &mut Vec<LLMServer>,
-    con: &mut RedisPoolConnection<MultiplexedConnection>,
+    con: &mut PooledConnection<'_, RedisConnectionManager>,
 ) -> Option<LLMServer> {
     while let Some(server) = select_best_server(&possible_servers.clone()) {
         let current_in_flight: i64 = con.get(&server.url).await.unwrap_or_default();
@@ -194,7 +194,7 @@ pub async fn request(mut req: Request<State>) -> tide::Result {
     let api_request: RequestBody = req.body_json().await.expect("unmarshal json");
 
     let state = req.state();
-    let mut redis = state.pool.acquire().await?;
+    let mut redis = state.pool.get().await?;
     let possible_servers = state.possible_servers.clone();
 
     let prompt_hash = hash_string(&api_request.prompt);
@@ -336,7 +336,7 @@ pub async fn request(mut req: Request<State>) -> tide::Result {
 
 pub async fn get(req: Request<State>) -> tide::Result {
     let id: String = req.param("id")?.to_string();
-    let mut redis = req.state().pool.acquire().await?;
+    let mut redis = req.state().pool.get().await?;
     let r: String = redis.get(id).await.unwrap_or_default();
 
     Ok(tide::Response::builder(tide::StatusCode::Ok)
@@ -346,7 +346,7 @@ pub async fn get(req: Request<State>) -> tide::Result {
 }
 
 async fn llm_request(
-    pool: RedisPool<Client, MultiplexedConnection>,
+    pool: std::sync::Arc<bb8::Pool<RedisConnectionManager>>,
     redis_expiration: u64,
     s3_url: String,
     s3_user: String,
@@ -362,10 +362,10 @@ async fn llm_request(
     opensearch_user: String,
     opensearch_password: String,
     opensearch_index: String,
-    opensearch_clients: Vec<OpenSearch>,
+    opensearch_clients: std::sync::Arc<Vec<OpenSearch>>,
     embedding_model: String,
 ) {
-    let mut conn = pool.acquire().await.expect("acquire redis conn");
+    let mut conn = pool.get().await.expect("get redis conn");
     let url = Url::from_str(&format!("{}generate", server.url)).expect("URL");
     let _reset_res: String = conn.incr(&server.url, 1).await.unwrap();
     let client = reqwest::Client::builder()
@@ -400,7 +400,7 @@ async fn llm_request(
         )
         .await;
         let mut context = String::default();
-        for client in opensearch_clients.clone() {
+        for client in opensearch_clients.clone().iter() {
             let search_results = opensearch_api::search_similar(
                 &client,
                 opensearch_index.clone(),
@@ -512,7 +512,7 @@ async fn llm_request(
         response_id.clone(),
     )
     .await;
-    for os_client in opensearch_clients.clone() {
+    for os_client in opensearch_clients.clone().iter() {
         opensearch_api::insert_document(
             &os_client,
             opensearch_index.clone(),
@@ -556,14 +556,14 @@ pub struct EmbeddingResponse {
 }
 
 pub async fn embedding_request(
-    pool: RedisPool<Client, MultiplexedConnection>,
+    pool: std::sync::Arc<bb8::Pool<RedisConnectionManager>>,
     redis_expiration: u64,
     timestamp_str: String,
     server: LLMServer,
     request_body: EmbedRequestBody,
     response_id: uuid::Uuid,
 ) -> EmbeddingResponse {
-    let mut conn = pool.acquire().await.expect("acquire redis conn");
+    let mut conn = pool.get().await.expect("get redis conn");
     let url = Url::from_str(&format!("{}embed", server.url)).expect("URL");
 
     let embed_hash = hash_string(&request_body.input);

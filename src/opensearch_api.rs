@@ -46,7 +46,7 @@ pub async fn index(mut req: Request<crate::State>) -> tide::Result {
     let now = SystemTime::now();
     let datetime: DateTime<Utc> = now.into();
     let timestamp_str = datetime.format("%Y-%m-%d %H:%M:%S").to_string();
-    let mut redis = state.pool.acquire().await?;
+    let mut redis = state.pool.get().await?;
 
     let next_available = find_available_server(&mut state.possible_servers.clone(), &mut redis).await;
     let opensearch = state.opensearch_clients.first().expect("no open search cluster is available for use");
